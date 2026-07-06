@@ -1,0 +1,22 @@
+cat << 'EOF' > .gitignore
+# Node/Vite logs & modules
+**/node_modules/
+**/dist/
+.eslintcache
+
+# .NET build artifacts
+**/bin/
+**/obj/
+.vs/
+
+# Python Virtual Environment & cache
+**/venv/
+**/__pycache__/
+*.pyc
+
+# Generated runtime results
+*.jpg
+*.jpeg
+*.png
+.DS_Store
+EOF

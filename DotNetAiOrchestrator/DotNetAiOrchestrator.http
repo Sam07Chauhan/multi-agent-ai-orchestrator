@@ -1,0 +1,6 @@
+@DotNetAiOrchestrator_HostAddress = http://localhost:5137
+
+GET {{DotNetAiOrchestrator_HostAddress}}/weatherforecast/
+Accept: application/json
+
+###
