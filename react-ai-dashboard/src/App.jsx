@@ -3,6 +3,7 @@ import { Sparkles, Database, Image as ImageIcon, Cpu, Loader2, Code } from "luci
 
 function App() {
   const [prompt, setPrompt] = useState("");
+  // ⚡ REFACTOR: Use a single state object for related states
   const [mode, setMode] = useState("auto"); // Options: auto, image, data
   const [selectedFile, setSelectedFile] = useState(null);
   const [previewUrl, setPreviewUrl] = useState(null);
@@ -43,11 +44,16 @@ function App() {
       formData.append("file", selectedFile);
     }
 
+    // ⚡ FIX: Implement AbortController for cancellable fetch requests
+    const abortController = new AbortController();
+    const signal = abortController.signal;
+
     try {
       // .NET Gateway Engine Base Port Call Injection
       const response = await fetch("http://localhost:5137/api/orchestrator/process", {
         method: "POST",
         body: formData, // Automatic Boundary setup handled by standard fetch core
+        signal, // Pass the signal to the fetch request
       });
 
       if (!response.ok) {
@@ -58,6 +64,9 @@ function App() {
       const data = await response.json();
       setResponseData(data);
     } catch (err) {
+      if (err.name === 'AbortError') {
+        console.log('Fetch aborted'); // Don't set error state for aborts
+      }
       console.error("UI Gateway Error Layer caught:", err);
       setError(err.message || "Failed to establish proxy connection to AI service layer.");
     } finally {

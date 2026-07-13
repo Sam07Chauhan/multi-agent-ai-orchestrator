@@ -15,7 +15,7 @@ LLAMA_OLLAMA_URL = "http://localhost:11434/api/generate"
 # 3. Stable Diffusion Parameters
 IMAGE_SIZE = 512
 INFERENCE_STEPS = 35
-GUIDANCE_SCALE = 12.5
+GUIDANCE_SCALE = 8.5
 INPAINT_STRENGTH = 1.0
 
 # 4. Face Recovery & Blending Tuning
@@ -29,9 +29,6 @@ if not os.path.exists(TEMP_OUTPUT_DIR):
 
 # 6. Ultra Clean Custom Negative Prompt
 GLOBAL_NEGATIVE_PROMPT = (
-    "blurry, distorted, low quality, bad anatomy, deformed limbs, missing limbs, "
-    "extra limbs, mutated hands, bad hands, extra fingers, messy clothes, ugly, "
-    "disfigured, watermark, text, signature, logo, duplicate body, cropped, "
-    "bad portrait, plastic skin, uncanny valley, bad face structure, artifacting, "
-    "jpeg artifacts, noise"
+    "blurry, low quality, bad anatomy, deformed, ugly, watermark, text, "
+    "logo, cropped, plastic skin, jpeg artifacts"
 )

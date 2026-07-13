@@ -34,7 +34,8 @@ class YoloFaceEngine:
         # Exact face coordinates scale limits ke andar define karte hain
         f_x0 = max(0, x_min - x_pad)
         f_y0 = max(0, y_min - 5)
-        f_x1 = min(config.IMAGE_SIZE, x_max + x_pad)
-        f_y1 = min(config.IMAGE_SIZE, face_bottom)
+        img_limit = image.size[0] if image is not None else config.IMAGE_SIZE
+        f_x1 = min(img_limit, x_max + x_pad)
+        f_y1 = min(img_limit, face_bottom)
         
         return [f_x0, f_y0, f_x1, f_y1]

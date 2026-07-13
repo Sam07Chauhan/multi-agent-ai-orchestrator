@@ -1,24 +1,31 @@
 import io
 import uuid
 import logging
+import torch
+import base64
+import os
+
 import config
 from fastapi import FastAPI, UploadFile, File, Form, HTTPException, BackgroundTasks
 from fastapi.responses import JSONResponse
 from PIL import Image
 
-# Modular imports according to project architecture
 from engines.inpaint import InpaintEngine
 from engines.text_enhancer import LlamaOrchestrator
-from services.pre_process import preprocess_image, segment_subject
-from services.post_process import apply_face_shield_mask, restore_face
+from engines.face_detection import YoloFaceEngine
+from engines.prompt_utils import fit_clip_prompt
+from services.pre_process import preprocess_image, segment_subject, build_inpaint_mask
+from services.post_process import restore_face, finalize_dimensions
 
 logging.basicConfig(level=logging.INFO, format="%(asctime)s [%(levelname)s] %(message)s")
 logger = logging.getLogger("m4_nexus")
 
 app = FastAPI(title="M4 Master AI Orchestrator Stack")
 
-# Lazy loading patterns for memory optimization
-inpaint_engine = InpaintEngine()
+target_device = "mps" if torch.backends.mps.is_available() else "cpu"
+logger.info(f"Targeting local runtime device acceleration: {target_device.upper()}")
+
+inpaint_engine = InpaintEngine(device=target_device)
 llama_orchestrator = LlamaOrchestrator()
 
 @app.post("/orchestrate")
@@ -32,59 +39,57 @@ async def central_orchestrator_endpoint(
     task_id = str(uuid.uuid4())
     logger.info(f"New Central Request Received | Task ID: {task_id} | Mode: {mode}")
 
-    # Step 1: Intent detection Python ki side Llama se natively check karein
     detected_intent = mode.upper()
     if mode == "auto" or not mode:
         detected_intent = await llama_orchestrator.detect_intent(prompt)
-    
+
     logger.info(f"Mapped Engine Routing Execution Pathway: {detected_intent}")
 
-    # Route 1: Database Operations Layer (No Heavy Stable Diffusion Models Loaded)
     if detected_intent == "DATABASE_QUERY" or detected_intent == "DATA":
         if not schema:
             return JSONResponse(status_code=400, content={"error": "Database schema context string missing from .NET layer."})
-        
+
         sql_result = await llama_orchestrator.generate_sql_query(prompt, schema)
         return {"task_id": task_id, "type": "DATABASE_SQL", "payload": sql_result}
 
-    # Route 2: Image Editing Layer (Stable Diffusion Workflow)
     elif detected_intent == "IMAGE_EDIT" or detected_intent == "IMAGE":
         if not file:
             raise HTTPException(status_code=400, detail="Image matrix payload missing for AI Editing flow.")
 
         try:
-            # File data preprocessing pipeline execution
             image_bytes = await file.read()
             input_image = Image.open(io.BytesIO(image_bytes)).convert("RGB")
-            
-            # YOLO auto masking setup
-            auto_mask, person_box = segment_subject(input_image)
-            
-            # Geometric fallback face protection matrix
-            final_mask = apply_face_shield_mask(auto_mask, person_box)
-            
-            # Heavy pipeline processing execution trigger safely 
-            edited_image = inpaint_engine.process_inpaint(
-                image=input_image,
-                mask=final_mask,
-                prompt=prompt
+            orig_size = input_image.size
+
+            processed_image, max_side, offset = preprocess_image(input_image)
+            person_mask, person_box = segment_subject(processed_image)
+            face_box = YoloFaceEngine().detect_main_face(processed_image, person_box)
+            final_mask = build_inpaint_mask(
+                processed_image, person_mask, person_box, face_box, prompt
             )
-            
-            # Alpha blending restoration layer
-            restored_output = restore_face(input_image, edited_image, person_box)
-            
-            # Save matrix system output with unique token signatures dynamically
-            temp_output_path = f"{config.TEMP_OUTPUT_DIR}/{task_id}.jpg"
-            restored_output.save(temp_output_path, quality=95)
-            
-            # Return base64 stream or direct reference links dynamically to .NET
-            with open(temp_output_path, "rb") as image_file:
-                import base64
-                encoded_string = base64.b64encode(image_file.read()).decode('utf-8')
-            
-            # Queue background task to clean hard disk storage VRAM state 
-            background_tasks.add_task(lambda: io.os.remove(temp_output_path) if io.os.path.exists(temp_output_path) else None)
-            
+
+            sd_prompt = fit_clip_prompt(prompt)
+            logger.info(f"SD prompt ({len(sd_prompt)} chars): {sd_prompt}")
+
+            edited_image = inpaint_engine.process_inpaint(
+                image=processed_image,
+                mask_image=final_mask,
+                prompt=sd_prompt,
+            )
+
+            restored_output = restore_face(edited_image, processed_image, face_box)
+            restored_output = finalize_dimensions(
+                restored_output, orig_size, offset, max_side
+            )
+
+            # ⚡ REFACTOR: In-memory image encoding to Base64
+            # Avoids unnecessary disk I/O by saving the image to a memory buffer
+            # and encoding directly. This is more efficient and removes the need for
+            # temporary files and background cleanup tasks.
+            buffer = io.BytesIO()
+            restored_output.save(buffer, format="JPEG", quality=95)
+            encoded_string = base64.b64encode(buffer.getvalue()).decode("utf-8")
+
             return {"task_id": task_id, "type": "IMAGE_BASE64", "payload": encoded_string}
 
         except Exception as e:

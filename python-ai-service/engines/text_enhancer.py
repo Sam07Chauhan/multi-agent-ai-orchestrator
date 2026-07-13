@@ -9,7 +9,7 @@ class LlamaOrchestrator:
         self.ollama_url = "http://localhost:11434/api/generate"
 
     async def detect_intent(self, user_query: str) -> str:
-        """Llama 3 ka use karke user query ka intent classification karna"""
+        """Classify the user's query intent using Llama 3."""
         system_instruction = (
             "You are an AI Routing Assistant. Classify the user query into exactly ONE category.\n"
             "Categories:\n"
@@ -36,7 +36,7 @@ class LlamaOrchestrator:
             return "IMAGE_EDIT"
 
     async def generate_sql_query(self, user_query: str, schema_str: str) -> str:
-        """Schema framework ke according Text-to-SQL run karna"""
+        """Run Text-to-SQL generation based on the provided schema framework."""
         system_instruction = (
             f"You are an expert SQL Generator. Use this database schema to write a clean SQL query:\n"
             f"{schema_str}\n"
