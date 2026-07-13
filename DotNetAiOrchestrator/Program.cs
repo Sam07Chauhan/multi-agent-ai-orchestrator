@@ -1,10 +1,17 @@
-using DotNetAiOrchestrator.Services; // Ensure aapka sahi namespace yahan ho
+// Ensure aapka sahi namespace yahan ho
 
 var builder = WebApplication.CreateBuilder(args);
 
 // --- SERVICES REGISTRATION ---
 builder.Services.AddControllers(); // API Controllers run karne ke liye zaroori hai
-builder.Services.AddHttpClient();
+
+// ⚡ FIX: Named HttpClient configure kiya jo Python FastAPI Orchestrator se communicate karega
+builder.Services.AddHttpClient("PythonAiClient", client =>
+{
+    client.BaseAddress = new Uri("http://localhost:8000/"); // Python server port framework address
+    client.Timeout = TimeSpan.FromMinutes(5); // ⚡ Heavy Image Inpainting generation ke liye timeout 5 minutes kiya
+});
+
 builder.Services.AddScoped<AiOrchestratorService>();
 
 // React UI dev environment communication allowance

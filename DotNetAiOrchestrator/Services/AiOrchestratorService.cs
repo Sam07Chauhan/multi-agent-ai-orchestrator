@@ -1,142 +1,112 @@
-using DotNetAiOrchestrator.Models;
-using OllamaSharp;
 using System;
 using System.IO;
 using System.Net.Http;
 using System.Net.Http.Headers;
+using System.Text.Json;
+using System.Text;
 using System.Threading.Tasks;
-
-namespace DotNetAiOrchestrator.Services;
+using Microsoft.AspNetCore.Http;
+using Microsoft.Extensions.Configuration;
+using MySql.Data.MySqlClient;
 
 public class AiOrchestratorService
 {
-    private readonly IOllamaApiClient _ollamaClient;
-    private readonly HttpClient _pythonClient;
+    private readonly IHttpClientFactory _httpClientFactory;
+    private readonly string _connectionString; // Non-nullable variable explicitly initialized
 
-    public AiOrchestratorService(IHttpClientFactory httpClientFactory)
+    public AiOrchestratorService(IHttpClientFactory httpClientFactory, IConfiguration configuration)
     {
-        // Native Ollama Client initialization
-        var uri = new Uri("http://localhost:11434");
-        _ollamaClient = new OllamaApiClient(uri, "llama3");
-
-        // Python FastAPI Client initialization
-        _pythonClient = httpClientFactory.CreateClient();
-        _pythonClient.BaseAddress = new Uri("http://localhost:8000/");
+        _httpClientFactory = httpClientFactory;
+        // ⚡ FIX CS8601 & CS8618: Connection string lookup fallback applied safely to prevent null assignment
+        _connectionString = configuration.GetConnectionString("DefaultConnection") ?? "";
     }
 
-    public async Task<OrchestratorResponse> ProcessAndRouteAsync(OrchestratorRequest request)
+    public async Task<object> RouteToPythonOrchestratorAsync(string userQuery, IFormFile? imageFile, string requestMode)
     {
-        // Step 1: Detect Intent with robustness fix
-        ActionType intent = await DetectIntentWithLlama3Async(request.UserQuery, request.File != null);
+        var client = _httpClientFactory.CreateClient("PythonAiClient");
+        using var content = new MultipartFormDataContent();
 
-        // --- OPTIMIZATION STEP: Peak Load Check ---
-        // If image generation/editing task, check Python status. 
-        // For production, implement a heart-beat check.
+        content.Add(new StringContent(userQuery), "prompt");
+        content.Add(new StringContent(requestMode), "mode");
 
-        // Step 2: Validate Workflow before executing heavy pipelines
-        if (intent == ActionType.IMAGE_EDIT && request.File == null)
+        if (requestMode == "data" || userQuery.ToLower().Contains("database") || userQuery.ToLower().Contains("report"))
         {
-            // NullReferenceException Prevention
-            Console.WriteLine("[ORCHESTRATOR ERROR] Intent: IMAGE_EDIT detected, but no file provided.");
-            return new OrchestratorResponse { 
-                ActionPerformed = "NONE_ERROR_VALIDATION", 
-                DataType = "TEXT",
-                Content = "You asked to edit an image, but didn't attach one. Please provide a reference image."
-            };
+            string liveSchema = await FetchLiveSchemaFromMySqlAsync();
+            content.Add(new StringContent(liveSchema), "schema");
         }
 
-        // Step 3: Dispatch Workflow
-        return intent switch
+        if (imageFile != null && imageFile.Length > 0)
         {
-            ActionType.IMAGE_EDIT => await DispatchToImageEditAsync(request.File!, request.UserQuery),
-            ActionType.IMAGE_CREATE => await DispatchToImageCreateAsync(request.UserQuery),
-            ActionType.DATABASE_QUERY => await DispatchToDatabaseQueryAsync(request.Schema, request.UserQuery),
-            _ => new OrchestratorResponse { ActionPerformed = "NONE", DataType="TEXT", Content = "Operation not defined." }
-        };
+            var streamContent = new StreamContent(imageFile.OpenReadStream());
+            streamContent.Headers.ContentType = new MediaTypeHeaderValue(imageFile.ContentType);
+            content.Add(streamContent, "file", imageFile.FileName);
+        }
+
+        var response = await client.PostAsync("orchestrate", content);
+        
+        if (!response.IsSuccessStatusCode)
+        {
+            throw new Exception($"Python AI Engine Processing Error: {response.ReasonPhrase}");
+        }
+
+        var responseString = await response.Content.ReadAsStringAsync();
+        
+        // ⚡ FIX CS8603: Deserialized object null fallback protection added
+        var result = JsonSerializer.Deserialize<object>(responseString);
+        return result ?? new { error = "Empty dynamic object layout signature returned." };
     }
 
-    private async Task<ActionType> DetectIntentWithLlama3Async(string query, bool userProvidedAnImage)
+    private async Task<string> FetchLiveSchemaFromMySqlAsync()
     {
-        var systemPrompt = $@"You are an AI Routing Agent. Classify the user request into:
-        - IMAGE_EDIT (change, enhance, fix a photo AND current context userProvidedAnImage is TRUE)
-        - IMAGE_CREATE (generate a new photo from scratch text prompt)
-        - DATABASE_QUERY (requires SQL structure generation)
-        Context: userProvidedAnImage = {userProvidedAnImage}. 
-        Return ONLY the raw category string name. No explanation.";
+        if (string.IsNullOrEmpty(_connectionString))
+        {
+            return "Fallback Schema: No database connection string detected inside infrastructure layer.";
+        }
 
+        var schemaBuilder = new StringBuilder();
+        
         try
         {
-            string prompt = $"{systemPrompt}\n\nUser Request: {query}";
-            
-            var responseStream = _ollamaClient.GenerateAsync(prompt);
-            var fullResponse = new System.Text.StringBuilder();
-            
-            await foreach (var chunk in responseStream)
+            using var connection = new MySqlConnection(_connectionString);
+            await connection.OpenAsync();
+
+            string query = @"
+                SELECT TABLE_NAME, COLUMN_NAME, DATA_TYPE 
+                FROM INFORMATION_SCHEMA.COLUMNS 
+                WHERE TABLE_SCHEMA = DATABASE()
+                ORDER BY TABLE_NAME, ORDINAL_POSITION;";
+
+            using var command = new MySqlCommand(query, connection);
+            using var reader = await command.ExecuteReaderAsync();
+
+            string currentTable = "";
+            while (await reader.ReadAsync())
             {
-                if (chunk != null && !string.IsNullOrEmpty(chunk.Response))
+                // ⚡ FIX CS8600: explicit string casts with null verification checks
+                string tableName = reader["TABLE_NAME"]?.ToString() ?? "";
+                string columnName = reader["COLUMN_NAME"]?.ToString() ?? "";
+                string dataType = reader["DATA_TYPE"]?.ToString() ?? "";
+
+                if (currentTable != tableName)
                 {
-                    fullResponse.Append(chunk.Response);
+                    if (!string.IsNullOrEmpty(currentTable)) schemaBuilder.Append("); ");
+                    currentTable = tableName;
+                    schemaBuilder.Append($"Table: {currentTable} (");
                 }
+                else
+                {
+                    schemaBuilder.Append(", ");
+                }
+
+                schemaBuilder.Append($"{columnName} {dataType}");
             }
+            if (!string.IsNullOrEmpty(currentTable)) schemaBuilder.Append(");");
 
-            string intentStr = fullResponse.ToString().Replace("\"", "").Trim();
-
-            if (Enum.TryParse(intentStr, out ActionType action)) return action;
-            return ActionType.UNKNOWN;
+            return schemaBuilder.ToString();
         }
         catch (Exception ex)
         {
-            Console.WriteLine($"Ollama Routing Error: {ex.Message}");
-            return ActionType.UNKNOWN;
+            return $"MySQL Schema Extraction Error Fallback: {ex.Message}";
         }
-    }
-
-    private async Task<OrchestratorResponse> DispatchToImageEditAsync(IFormFile file, string prompt)
-    {
-        using var content = new MultipartFormDataContent();
-        using var stream = file.OpenReadStream();
-        var streamContent = new StreamContent(stream);
-        streamContent.Headers.ContentType = new MediaTypeHeaderValue(file.ContentType ?? "image/jpeg");
-        
-        content.Add(streamContent, "file", file.FileName);
-        content.Add(new StringContent(prompt), "prompt");
-
-        // Execute Heavy ML Pipeline in Python
-        var response = await _pythonClient.PostAsync("process", content);
-        response.EnsureSuccessStatusCode();
-        var bytes = await response.Content.ReadAsByteArrayAsync();
-        
-        return new OrchestratorResponse {
-            ActionPerformed = "IMAGE_EDIT",
-            DataType = "IMAGE_BASE64",
-            Content = $"data:image/jpeg;base64,{Convert.ToBase64String(bytes)}"
-        };
-    }
-
-    private async Task<OrchestratorResponse> DispatchToImageCreateAsync(string prompt)
-    {
-        using var content = new MultipartFormDataContent();
-        content.Add(new StringContent(prompt), "prompt");
-
-        // Execute Heavy ML Pipeline in Python
-        var response = await _pythonClient.PostAsync("generate", content);
-        response.EnsureSuccessStatusCode();
-        var bytes = await response.Content.ReadAsByteArrayAsync();
-
-        return new OrchestratorResponse {
-            ActionPerformed = "IMAGE_CREATE",
-            DataType = "IMAGE_BASE64",
-            Content = $"data:image/jpeg;base64,{Convert.ToBase64String(bytes)}"
-        };
-    }
-
-    private async Task<OrchestratorResponse> DispatchToDatabaseQueryAsync(string? schema, string query)
-    {
-        // Keep this lightweight to prevent memory pressure
-        return await Task.FromResult(new OrchestratorResponse {
-            ActionPerformed = "DATABASE_QUERY",
-            DataType = "JSON",
-            Content = new { Query = "Generated SQL structure.", Message = "Endpoint functional." }
-        });
     }
 }

@@ -1,0 +1,63 @@
+# services/post_process.py
+import logging
+from PIL import Image, ImageDraw, ImageFilter
+import config
+
+logger = logging.getLogger("m4_nexus")
+
+def apply_face_shield_mask(mask: Image.Image, face_box: list) -> Image.Image:
+    """Modifies the generated segmentation mask to protect the face."""
+    if face_box is None:
+        return mask
+        
+    logger.info("🛡️ [FACE PROTECTION] Precise YOLOv8-Face geometry shielded.")
+    
+    # We create a DRAW object on the generated body mask
+    draw = ImageDraw.Draw(mask)
+    
+    # Extract coordinates and add safety padding (config)
+    x0, y0, x1, y1 = face_box
+    pad = config.FACE_BOX_PADDING
+    
+    padded_box = [
+        max(0, x0 - pad),
+        max(0, y0 - pad),
+        min(config.IMAGE_SIZE, x1 + pad),
+        min(config.IMAGE_SIZE, y1 + pad)
+    ]
+    
+    # Paint face black in the INPAINT MASK (0, 0, 0 means 'don't touch')
+    draw.rectangle(padded_box, fill=(0, 0, 0))
+    return mask
+
+def restore_face(edited_image: Image.Image, source_image: Image.Image, face_box: list) -> Image.Image:
+    """
+    Seamless alpha blended back-pasting of original face features.
+    (This function was already strong, just updated for modular input)
+    """
+    if face_box is None:
+        return edited_image
+
+    logger.info("🛡️ [FACE RECOVERY] Applying seamless alpha blended back-paste...")
+    x0, y0, x1, y1 = [int(coord) for coord in face_box]
+    
+    # 1. Crop original crisp face
+    orig_face_crop = source_image.crop((x0, y0, x1, y1))
+    
+    # 2. Generate smooth edge feathering mask
+    mask_blur = Image.new("L", orig_face_crop.size, 0)
+    draw_blur = ImageDraw.Draw(mask_blur)
+    
+    # Define feathering border (5px by default from config)
+    f_p = config.FEATHER_BLUR_RADIUS
+    draw_blur.rectangle(
+        [f_p, f_p, mask_blur.size[0] - f_p, mask_blur.size[1] - f_p], 
+        fill=255
+    )
+    
+    # Blur the mask edges for seamless integration
+    mask_blur = mask_blur.filter(ImageFilter.GaussianBlur(radius=config.FEATHER_BLUR_RADIUS))
+    
+    # 3. Composite back seamlessly
+    edited_image.paste(orig_face_crop, (x0, y0), mask_blur)
+    return edited_image

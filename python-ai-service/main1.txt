@@ -1,0 +1,160 @@
+import os
+import ssl
+import io
+import base64
+import requests
+from fastapi import FastAPI, UploadFile, File, Form
+from fastapi.responses import FileResponse, JSONResponse
+import torch
+from diffusers import DiffusionPipeline, StableDiffusionPipeline
+from PIL import Image
+
+# SSL Certificate verification ko globally bypass karne ke liye (Enterprise proxy compatibility)
+ssl._create_default_https_context = ssl._create_unverified_context
+
+# Hugging Face hub telemetry warnings & symbolic linking flags ko manage karne ke liye
+os.environ["HF_HUB_DISABLE_SYMLINKS_WARNING"] = "1"
+os.environ["CURL_CA_BUNDLE"] = ""
+
+app = FastAPI(title="M4 Local AI Service with Optimized Prompt Expansion")
+
+# 1. Mac M4 (Metal Performance Shaders) Hardware Routing Engine
+device = "mps" if torch.backends.mps.is_available() else "cpu"
+print(f"Using Device: {device.upper()} for AI Generation")
+
+# 2. Local AI Models Loading Matrix
+print("Loading Image Editing Model (InstructPix2Pix)...")
+edit_pipe = DiffusionPipeline.from_pretrained(
+    "timbrooks/instruct-pix2pix", 
+    torch_dtype=torch.float16 if device == "mps" else torch.float32, 
+    safety_checker=None
+).to(device)
+
+print("Loading Image Generation Model (Stable Diffusion 1.5)...")
+create_pipe = StableDiffusionPipeline.from_pretrained(
+    "runwayml/stable-diffusion-v1-5", 
+    torch_dtype=torch.float16 if device == "mps" else torch.float32,
+    safety_checker=None
+).to(device)
+
+print("⚡ All Local Models Loaded Successfully on Mac M4 Neural Core!")
+
+
+# --- CORE UTILITIES / INTELLIGENT AGENT RUNTIME ---
+
+def enhance_prompt_with_llama(user_simple_prompt: str) -> str:
+    """
+    Local Ollama Llama 3 engine ko intercept karke user ke short query ko ek target
+    InstructPix2Pix optimization criteria prompt me convert karta h taaki features lock rahein.
+    """
+    #system_instruction = (
+    #    "You are an expert AI prompt engineer for InstructPix2Pix. "
+    #    "Your job is to take a simple clothing modification query and enhance it into a highly detailed instruction. "
+     #   "CRITICAL RULES:\n"
+    #    "1. You must explicitly command to keep the original face, features, hair, glasses, hands, and background completely unchanged.\n"
+     #   "2. Do not use prohibited words like 'breast'. Use professional anatomical terms like 'chest' or 'torso'.\n"
+     #   "3. Output ONLY the final enhanced prompt string. No conversational filler, no explanations, no quotes."
+    #)
+    system_instruction = (
+        "You are an expert AI prompt engineer for InstructPix2Pix image editing. "
+        "Your job is to convert simple user requests into precise editing commands. "
+        "CRITICAL RULES:\n"
+        "1. Always start with a precise action verb: 'Change the white outfit to...', 'Replace the white dress with...'.\n"
+        "2. Strictly command to modify ONLY the clothing of the single main person in the foreground. Explicitly add: 'Do not add any extra people, do not duplicate the person, keep a single person only'.\n"
+        "3. Explicitly command to keep the original face, hair, body pose, glasses, and background completely unchanged.\n"
+        "4. Output ONLY the final enhanced prompt string. No conversational filler, no explanations, no quotes."
+    )
+    
+    try:
+        url = "http://localhost:11434/api/generate"
+        payload = {
+            "model": "llama3",
+            "prompt": f"{system_instruction}\n\nUser Query: {user_simple_prompt}\n\nEnhanced Prompt:",
+            "stream": False,
+            "options": {
+                "num_predict": 60,      # ⚡ SPEED FIX 1: Max tokens restricted to 60 for instant inference response
+                "temperature": 0.2      # ⚡ SPEED FIX 2: Deterministic output mapping to avoid token delays
+            }
+        }
+        
+        # ⚡ TIMEOUT FIX: 5s se badhakar 25 seconds kiya taaki first-load standard buffers pool me hit na ho
+        response = requests.post(url, json=payload, timeout=25) 
+        if response.status_code == 200:
+            enhanced = response.json().get("response", "").strip()
+            # String cleaning to eliminate LLM syntax artifacts
+            enhanced = enhanced.replace('"', '').replace('`', '')
+            print(f"🔥 [PROMPT ENHANCED VIA LLAMA] Old: '{user_simple_prompt}' -> New: '{enhanced}'")
+            return enhanced
+    except Exception as e:
+        print(f"⚠️ [LLAMA ENHANCE FALLBACK] Using raw prompt. Reason: {e}")
+        
+    return user_simple_prompt
+
+
+# --- ENDPOINTS CORE ---
+
+@app.post("/process")
+async def edit_image(file: UploadFile = File(...), prompt: str = Form(...)):
+    contents = await file.read()
+    orig_image = Image.open(io.BytesIO(contents)).convert("RGB")
+    
+    # ⚡ FIX 1: Aspect Ratio distortion se bachne ke liye Square Padding logic
+    max_side = max(orig_image.size)
+    padded_image = Image.new("RGB", (max_side, max_side), (255, 255, 255))
+    offset = ((max_side - orig_image.size[0]) // 2, (max_side - orig_image.size[1]) // 2)
+    padded_image.paste(orig_image, offset)
+    
+    # Ab bina distortion ke perfect 512x512 par resize hoga
+    input_image = padded_image.resize((512, 512), Image.Resampling.LANCZOS)
+
+    # ⚡ AUTOMATED INTERCEPTION: Llama Prompt expansion execution with 25s safety ceiling
+    intelligent_prompt = enhance_prompt_with_llama(prompt)
+    #intelligent_prompt = prompt
+    print(f"[EDIT PIPELINE EXECUTION] Running matrix pipeline with prompt: {intelligent_prompt}")
+    
+    # ⚡ FIX 2: Tuned strict parameters to prevent facial distortion
+    # ⚡ STRICT ALIGNMENT LOCK
+    edited_image = edit_pipe(
+        intelligent_prompt, 
+        image=input_image, 
+        num_inference_steps=25,       # Steps 25 hi rakhein taaki noise kam ho
+        image_guidance_scale=2.0,     # 🔥 Isko 2.0 ya 2.2 tak badhaayein (Face aur single person body lock karne ke liye)
+        guidance_scale=7.0            # 🔥 Text strength ko 7.0 par laayein taaki color aur content bleach na ho
+    ).images[0]
+    
+    # ⚡ FIX 3: Output ko wapas original landscape/portrait layout me crop-back karna
+    ratio = max_side / 512
+    crop_box = (
+        int(offset[0] / ratio),
+        int(offset[1] / ratio),
+        int((offset[0] + orig_image.size[0]) / ratio),
+        int((offset[1] + orig_image.size[1]) / ratio)
+    )
+    final_output = edited_image.crop(crop_box).resize(orig_image.size, Image.Resampling.LANCZOS)
+    
+    output_path = "edit_result.jpg"
+    final_output.save(output_path, quality=95)
+    return FileResponse(output_path, media_type="image/jpeg")
+
+
+@app.post("/generate")
+async def generate_image(prompt: str = Form(...)):
+    print(f"[CREATE REQUEST] Prompt: {prompt}")
+    
+    # ⚡ CORE FIX: Quality aur Text-Alignment Controls
+    generated_image = create_pipe(
+        prompt, 
+        num_inference_steps=25,
+        guidance_scale=7.5,
+        width=512,
+        height=512
+    ).images[0]
+    
+    # Lanczos Resampling for smooth pixel artifacts reduction
+    final_output = generated_image.resize((512, 512), Image.Resampling.LANCZOS)
+    
+    output_path = "create_result.jpg"
+    # Higher quality texture rendering boundary configuration
+    final_output.save(output_path, quality=95)
+    
+    return FileResponse(output_path, media_type="image/jpeg")

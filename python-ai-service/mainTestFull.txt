@@ -1,0 +1,226 @@
+import os
+import ssl
+import io
+import base64
+import requests
+import numpy as np
+import cv2
+from fastapi import FastAPI, UploadFile, File, Form
+from fastapi.responses import FileResponse, JSONResponse
+import torch
+from diffusers import StableDiffusionInpaintPipeline, StableDiffusionPipeline
+from PIL import Image, ImageDraw
+
+# Ultralytics YOLO Module
+from ultralytics import YOLO
+
+# SSL globally bypass for proxy pipelines
+ssl._create_default_https_context = ssl._create_unverified_context
+os.environ["HF_HUB_DISABLE_SYMLINKS_WARNING"] = "1"
+os.environ["CURL_CA_BUNDLE"] = ""
+
+app = FastAPI(title="M4 Local AI Safe Inpainting Nexus - Face Recovery")
+
+device = "mps" if torch.backends.mps.is_available() else "cpu"
+print(f"Using Device: {device.upper()} for Core AI Engines")
+
+# 1. Loading YOLOv8-Segmentation Model
+print("Loading YOLOv8 AI Segmentation Engine...")
+yolo_model = YOLO("yolov8n-seg.pt")
+
+# 2. Loading Dedicated Inpainting Model
+print("Loading Ultra-Sharp Image Inpainting Model...")
+inpaint_pipe = StableDiffusionInpaintPipeline.from_pretrained(
+    "runwayml/stable-diffusion-inpainting",
+    torch_dtype=torch.float16 if device == "mps" else torch.float32,
+    safety_checker=None
+).to(device)
+
+# 3. Standard Text-to-Image Generation Model
+print("Loading Text-to-Image Generation Model (SD 1.5)...")
+create_pipe = StableDiffusionPipeline.from_pretrained(
+    "runwayml/stable-diffusion-v1-5", 
+    torch_dtype=torch.float16 if device == "mps" else torch.float32,
+    safety_checker=None
+).to(device)
+
+print("⚡ All Local Core Models loaded perfectly without compilation issues!")
+
+
+# --- LLAMA 3 INPAINT TEXTURE ENHANCER ---
+
+def enhance_inpaint_prompt(user_simple_prompt: str) -> str:
+    system_instruction = (
+        "You are an expert prompt engineer for Stable Diffusion Inpainting. "
+        "Expand the clothing description into a rich, photorealistic prompt for the masked area. "
+        "CRITICAL RULES: "
+        "1. MAXIMUM 40 WORDS. Use ONLY comma-separated tags, NEVER full sentences. "
+        "2. If the clothing is revealing (no clothes), explicitly add these exact tags: 'raw photo, highly detailed bare midriff, natural skin texture, skin pores, subtle skin imperfections'."
+        "3. If the clothing is revealing (e.g., bikini, crop top, shorts), explicitly add these exact tags: 'raw photo, highly detailed bare midriff, natural skin texture, skin pores, subtle skin imperfections'."
+        #"4. Focus heavily on fabric texture and highly detailed human skin. "
+        "5. Output ONLY the final prompt."
+    )
+    try:
+        url = "http://localhost:11434/api/generate"
+        payload = {
+            "model": "llama3",
+            "prompt": f"{system_instruction}\n\nUser Clothing Request: {user_simple_prompt}\n\nEnhanced Inpaint Prompt:",
+            "stream": False,
+            "options": {"num_predict": 150, "temperature": 0.3}
+        }
+        response = requests.post(url, json=payload, timeout=25) 
+        if response.status_code == 200:
+            return response.json().get("response", "").strip().replace('"', '').replace('`', '')
+    except Exception as e:
+        print(f"⚠️ [LLAMA FALLBACK] Reason: {e}")
+    return user_simple_prompt
+
+
+# --- SERVICE ENDPOINTS ---
+
+@app.post("/process")
+async def inpaint_image(
+    file: UploadFile = File(...), 
+    mask_file: UploadFile = File(None),  
+    prompt: str = Form(...)
+):
+    print(f"[INPAINT EXECUTION] Simple Prompt: '{prompt}'")
+    
+    img_bytes = await file.read()
+    orig_image = Image.open(io.BytesIO(img_bytes)).convert("RGB")
+    
+    max_side = max(orig_image.size)
+    padded_image = Image.new("RGB", (max_side, max_side), (255, 255, 255))
+    offset = ((max_side - orig_image.size[0]) // 2, (max_side - orig_image.size[1]) // 2)
+    padded_image.paste(orig_image, offset)
+    input_image = padded_image.resize((512, 512), Image.Resampling.LANCZOS)
+    
+    # Coordinates array to back-paste the sharp original face
+    # Coordinates array to back-paste the sharp original face
+    face_coordinates = None
+    
+    if mask_file is None:
+        print("🔍 [YOLO CORE] Tracking body matrix and computing absolute face shields...")
+        results = yolo_model.predict(input_image, conf=0.25, verbose=False)
+        
+        auto_mask = Image.new("RGB", (512, 512), (0, 0, 0))
+        draw = ImageDraw.Draw(auto_mask)
+        
+        # --- NAYA YOLO PROCESSING BLOCK YAHAN SE SHURU ---
+        person_detected = False
+        largest_area = 0
+        main_polygon = None
+        main_box = None
+        
+        for result in results:
+            if result.masks is not None:
+                for mask, box in zip(result.masks.xy, result.boxes):
+                    class_id = int(box.cls[0])
+                    if class_id == 0:  # Person
+                        # Calculate area to find the main subject
+                        bbox = box.xyxy[0].tolist()
+                        area = (bbox[2] - bbox[0]) * (bbox[3] - bbox[1])
+                        
+                        if area > largest_area:
+                            largest_area = area
+                            main_polygon = [(int(x), int(y)) for x, y in mask]
+                            main_box = bbox
+                            person_detected = True
+
+        if person_detected and len(main_polygon) > 2:
+            # 1. Sirf sabse bade person ko white paint karein
+            draw.polygon(main_polygon, fill=(255, 255, 255))
+            
+            # 2. Mathematical Face Shield (Sirf main person ke liye)
+            x_min, y_min, x_max, y_max = main_box
+            person_height = y_max - y_min
+            person_width = x_max - x_min
+            
+            face_bottom = y_min + (person_height * 0.32)
+            x_pad = person_width * 0.05
+            
+            x0_f = int(max(0, x_min - x_pad))
+            y0_f = int(max(0, y_min - 10))
+            x1_f = int(min(512, x_max + x_pad))
+            y1_f = int(min(512, face_bottom))
+            
+            print(f"🛡️ [FACE PROTECTION] Shielding MAIN subject face: Y0:{y0_f} -> Y1:{y1_f}")
+            draw.rectangle([x0_f, y0_f, x1_f, y1_f], fill=(0, 0, 0))
+            face_coordinates = (x0_f, y0_f, x1_f, y1_f)
+        # --- NAYA YOLO PROCESSING BLOCK YAHAN KHATAM ---
+        
+        if not person_detected:
+            print("⚠️ [YOLO WARNING] No person structure segmented. Activating safety box matrix fallback.")
+            
+        # IMPORTANT: Pichla fix jo humne kiya tha
+        input_mask = auto_mask
+
+    else:
+        # (Yahan se aapka aage ka 'else' block waise hi rahega jaise pehle tha)
+        mask_bytes = await mask_file.read()
+        orig_mask = Image.open(io.BytesIO(mask_bytes)).convert("RGB")
+        padded_mask = Image.new("RGB", (max_side, max_side), (0, 0, 0))
+        padded_mask.paste(orig_mask, offset)
+        input_mask = padded_mask.resize((512, 512), Image.Resampling.LANCZOS)
+
+    intelligent_prompt = enhance_inpaint_prompt(prompt)
+    #intelligent_prompt = prompt
+    print(f"🚀 [PIPELINE RUNNING] Prompt: {intelligent_prompt}")
+
+    edited_image = inpaint_pipe(
+        prompt=intelligent_prompt,
+        # "white clothes" hata diya taaki prompt conflict na ho
+        negative_prompt="blurry, distorted, low quality, bad anatomy, missing limbs, extra limbs, mutated, messy clothes",
+        image=input_image,
+        mask_image=input_mask,
+        num_inference_steps=35,
+        guidance_scale=12.5,
+        strength=1.0 # 0.99 se 1.0 kar dein for complete replacement
+    ).images[0]
+    
+    # ⚡ HD FACE RESTORATION LAYER MAPPING BYPASS
+    if face_coordinates is not None:
+        print("🛡️ [FACE RECOVERY] Applying seamless matrix alpha blending for face features...")
+        x0, y0, x1, y1 = face_coordinates
+        
+        # Ensure coordinates are within image boundaries
+        x0, y0 = max(0, x0), max(0, y0)
+        x1, y1 = min(512, x1), min(512, y1)
+        
+        # Crop original high-res face
+        orig_face_crop = input_image.crop((x0, y0, x1, y1))
+        
+        # Create a smooth feather mask so edges don't look distorted or cut
+        mask_blur = Image.new("L", orig_face_crop.size, 0)
+        draw_blur = ImageDraw.Draw(mask_blur)
+        draw_blur.rectangle([5, 5, mask_blur.size[0]-5, mask_blur.size[1]-5], fill=255)
+        
+        # Apply Gaussian Blur to the edges of the face mask layer
+        from PIL import ImageFilter
+        mask_blur = mask_blur.filter(ImageFilter.GaussianBlur(radius=4))
+        
+        # Paste back using the smooth alpha mask
+        edited_image.paste(orig_face_crop, (x0, y0), mask_blur)
+
+    # 2. Back-cropping Engine matrix alignment mapping (Yeh sabse last me hoga)
+    ratio = max_side / 512
+    crop_box = (
+        int(offset[0] / ratio), int(offset[1] / ratio),
+        int((offset[0] + orig_image.size[0]) / ratio), int((offset[1] + orig_image.size[1]) / ratio)
+    )
+    final_output = edited_image.crop(crop_box).resize(orig_image.size, Image.Resampling.LANCZOS)
+    
+    output_path = "edit_result.jpg"
+    final_output.save(output_path, quality=95)
+    return FileResponse(output_path, media_type="image/jpeg")
+
+
+@app.post("/generate")
+async def generate_image(prompt: str = Form(...)):
+    generated_image = create_pipe(
+        prompt, num_inference_steps=25, guidance_scale=7.5, width=512, height=512
+    ).images[0]
+    final_output = generated_image.resize((512, 512), Image.Resampling.LANCZOS)
+    output_path = "create_result.jpg"
+    final_output.save(output_path, quality=95)
+    return FileResponse(output_path, media_type="image/jpeg")

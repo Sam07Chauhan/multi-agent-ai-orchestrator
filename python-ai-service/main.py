@@ -1,79 +1,95 @@
-import os
-import ssl
-
-# SSL Certificate verification ko globally bypass karne ke liye
-ssl._create_default_https_context = ssl._create_unverified_context
-
-# Hugging Face hub ke liye SSL verify false set karna
-os.environ["HF_HUB_DISABLE_SYMLINKS_WARNING"] = "1"
-os.environ["CURL_CA_BUNDLE"] = ""
-
-
-from fastapi import FastAPI, UploadFile, File, Form
-from fastapi.responses import FileResponse
-import torch
-# StableDiffusionInstructionPix2PixPipeline ki jagah StableDiffusionInstructPix2PixPipeline use hota hai naye versions mein
-# Par safer side ke liye hum common DiffusionPipeline use karenge
-from diffusers import DiffusionPipeline, StableDiffusionPipeline
-from PIL import Image
 import io
+import uuid
+import logging
+import config
+from fastapi import FastAPI, UploadFile, File, Form, HTTPException, BackgroundTasks
+from fastapi.responses import JSONResponse
+from PIL import Image
 
-app = FastAPI(title="M4 Local AI Service")
+# Modular imports according to project architecture
+from engines.inpaint import InpaintEngine
+from engines.text_enhancer import LlamaOrchestrator
+from services.pre_process import preprocess_image, segment_subject
+from services.post_process import apply_face_shield_mask, restore_face
 
-# 1. Mac M4 (Metal) Core Graphic System Check
-device = "mps" if torch.backends.mps.is_available() else "cpu"
-print(f"Using Device: {device.upper()} for AI Generation")
+logging.basicConfig(level=logging.INFO, format="%(asctime)s [%(levelname)s] %(message)s")
+logger = logging.getLogger("m4_nexus")
 
-# 2. AI Models Loading
-print("Loading Image Editing Model (InstructPix2Pix)...")
-# Generic DiffusionPipeline standard checkpoint ko sahi se wrap kar leta hai
-edit_pipe = DiffusionPipeline.from_pretrained(
-    "timbrooks/instruct-pix2pix", 
-    torch_dtype=torch.float16 if device == "mps" else torch.float32, 
-    safety_checker=None
-).to(device)
+app = FastAPI(title="M4 Master AI Orchestrator Stack")
 
-print("Loading Image Generation Model (Stable Diffusion 1.5)...")
-create_pipe = StableDiffusionPipeline.from_pretrained(
-    "runwayml/stable-diffusion-v1-5", 
-    torch_dtype=torch.float16 if device == "mps" else torch.float32,
-    safety_checker=None
-).to(device)
+# Lazy loading patterns for memory optimization
+inpaint_engine = InpaintEngine()
+llama_orchestrator = LlamaOrchestrator()
 
-print("⚡ All Local Models Loaded Successfully on Mac M4 Neural Core!")
+@app.post("/orchestrate")
+async def central_orchestrator_endpoint(
+    background_tasks: BackgroundTasks,
+    prompt: str = Form(...),
+    mode: str = Form("auto"),
+    schema: str = Form(None),
+    file: UploadFile = File(None)
+):
+    task_id = str(uuid.uuid4())
+    logger.info(f"New Central Request Received | Task ID: {task_id} | Mode: {mode}")
 
-# --- ENDPOINTS ---
-
-@app.post("/process")
-async def edit_image(file: UploadFile = File(...), prompt: str = Form(...)):
-    contents = await file.read()
-    image = Image.open(io.BytesIO(contents)).convert("RGB")
-    image.thumbnail((512, 512))
-
-    print(f"[EDIT REQUEST] Prompt: {prompt}")
-    edited_image = edit_pipe(
-        prompt, 
-        image=image, 
-        num_inference_steps=15, 
-        image_guidance_scale=1.5
-    ).images[0]
+    # Step 1: Intent detection Python ki side Llama se natively check karein
+    detected_intent = mode.upper()
+    if mode == "auto" or not mode:
+        detected_intent = await llama_orchestrator.detect_intent(prompt)
     
-    output_path = "edit_result.jpg"
-    edited_image.save(output_path)
-    return FileResponse(output_path, media_type="image/jpeg")
+    logger.info(f"Mapped Engine Routing Execution Pathway: {detected_intent}")
 
+    # Route 1: Database Operations Layer (No Heavy Stable Diffusion Models Loaded)
+    if detected_intent == "DATABASE_QUERY" or detected_intent == "DATA":
+        if not schema:
+            return JSONResponse(status_code=400, content={"error": "Database schema context string missing from .NET layer."})
+        
+        sql_result = await llama_orchestrator.generate_sql_query(prompt, schema)
+        return {"task_id": task_id, "type": "DATABASE_SQL", "payload": sql_result}
 
-@app.post("/generate")
-async def generate_image(prompt: str = Form(...)):
-    print(f"[CREATE REQUEST] Prompt: {prompt}")
-    
-    generated_image = create_pipe(
-        prompt, 
-        num_inference_steps=15,
-        width=512,
-        height=512
-    ).images[0]
-    
-    output_path = "create_result.jpg"
-    generated_image.save(output_path)
-    return FileResponse(output_path, media_type="image/jpeg")
+    # Route 2: Image Editing Layer (Stable Diffusion Workflow)
+    elif detected_intent == "IMAGE_EDIT" or detected_intent == "IMAGE":
+        if not file:
+            raise HTTPException(status_code=400, detail="Image matrix payload missing for AI Editing flow.")
+
+        try:
+            # File data preprocessing pipeline execution
+            image_bytes = await file.read()
+            input_image = Image.open(io.BytesIO(image_bytes)).convert("RGB")
+            
+            # YOLO auto masking setup
+            auto_mask, person_box = segment_subject(input_image)
+            
+            # Geometric fallback face protection matrix
+            final_mask = apply_face_shield_mask(auto_mask, person_box)
+            
+            # Heavy pipeline processing execution trigger safely 
+            edited_image = inpaint_engine.process_inpaint(
+                image=input_image,
+                mask=final_mask,
+                prompt=prompt
+            )
+            
+            # Alpha blending restoration layer
+            restored_output = restore_face(input_image, edited_image, person_box)
+            
+            # Save matrix system output with unique token signatures dynamically
+            temp_output_path = f"{config.TEMP_OUTPUT_DIR}/{task_id}.jpg"
+            restored_output.save(temp_output_path, quality=95)
+            
+            # Return base64 stream or direct reference links dynamically to .NET
+            with open(temp_output_path, "rb") as image_file:
+                import base64
+                encoded_string = base64.b64encode(image_file.read()).decode('utf-8')
+            
+            # Queue background task to clean hard disk storage VRAM state 
+            background_tasks.add_task(lambda: io.os.remove(temp_output_path) if io.os.path.exists(temp_output_path) else None)
+            
+            return {"task_id": task_id, "type": "IMAGE_BASE64", "payload": encoded_string}
+
+        except Exception as e:
+            logger.critical(f"Critical System Inference Failure: {e}")
+            raise HTTPException(status_code=500, detail=f"AI Pipeline Execution Exception: {str(e)}")
+
+    else:
+        raise HTTPException(status_code=400, detail="Invalid Intent routing configuration.")
