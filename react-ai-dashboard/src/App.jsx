@@ -1,10 +1,10 @@
 import React, { useState } from "react";
-import { Sparkles, Database, Image as ImageIcon, Cpu, Loader2, Code } from "lucide-react";
+import { Sparkles, Database, Image as ImageIcon, Cpu, Loader2, Code, ScanSearch } from "lucide-react";
 
 function App() {
   const [prompt, setPrompt] = useState("");
   // ⚡ REFACTOR: Use a single state object for related states
-  const [mode, setMode] = useState("auto"); // Options: auto, image, data
+  const [mode, setMode] = useState("auto"); // Options: auto, image, image_analysis, data
   const [selectedFile, setSelectedFile] = useState(null);
   const [previewUrl, setPreviewUrl] = useState(null);
   
@@ -108,7 +108,7 @@ function App() {
             {/* Mode Select Tabs - Addresses Dynamic Agent Routing Switch */}
             <div className="flex flex-col gap-2">
               <label className="text-xs font-semibold text-slate-400">Orchestration Intent Pathway</label>
-              <div className="grid grid-cols-3 gap-2 bg-slate-950 p-1 rounded-xl border border-slate-900">
+              <div className="grid grid-cols-4 gap-2 bg-slate-950 p-1 rounded-xl border border-slate-900">
                 <button
                   type="button"
                   onClick={() => setMode("auto")}
@@ -126,6 +126,15 @@ function App() {
                   }`}
                 >
                   <ImageIcon className="w-3.5 h-3.5" /> AI Canvas
+                </button>
+                <button
+                  type="button"
+                  onClick={() => setMode("image_analysis")}
+                  className={`flex items-center justify-center gap-1.5 py-2 text-xs font-medium rounded-lg transition-all ${
+                    mode === "image_analysis" ? "bg-indigo-600/90 text-white shadow-md shadow-indigo-600/10" : "text-slate-400 hover:text-slate-200"
+                  }`}
+                >
+                  <ScanSearch className="w-3.5 h-3.5" /> Analyze
                 </button>
                 <button
                   type="button"
@@ -177,6 +186,8 @@ function App() {
                 placeholder={
                   mode === "data"
                     ? "e.g., Generate a performance report showing all premium users with transactions exceeding 500 units last month..."
+                    : mode === "image_analysis"
+                    ? "e.g., Analyze the facial structure and body proportions in this image..."
                     : "e.g., Transform the current casual dress texture layout into an elegant formal navy blue blazer with fine silk contours..."
                 }
                 className="w-full bg-slate-950 border border-slate-900 rounded-xl px-3.5 py-2.5 text-xs text-slate-200 placeholder-slate-600 focus:outline-none focus:border-indigo-500 transition-colors resize-none leading-relaxed shadow-inner"
@@ -236,6 +247,8 @@ function App() {
                   <p className="text-[10px] text-slate-500 leading-relaxed">
                     {mode === "data" 
                       ? "Fetching structural schema catalog metadata and executing local Llama LLM Text-to-SQL logic block..."
+                      : mode === "image_analysis"
+                      ? "Running face mesh, pose, and structure classification engines to extract measurements..."
                       : "Triggering YOLOv8 subject segmentation, calculating face mesh shields, and passing vectors to Diffusion pipelines..."}
                   </p>
                 </div>
@@ -281,6 +294,38 @@ function App() {
                     <pre className="flex-1 w-full bg-slate-900/50 border border-slate-900 font-mono text-xs text-emerald-400 p-4 rounded-xl overflow-auto select-all leading-relaxed whitespace-pre-wrap text-left shadow-inner border-t-2 border-t-emerald-600/30">
                       {responseData.payload}
                     </pre>
+                  </div>
+                )}
+
+                {responseData.type === "IMAGE_ANALYSIS" && (
+                  <div className="flex-1 w-full flex flex-col gap-3 overflow-auto">
+                    <div className="flex items-center gap-1.5 text-xs text-slate-400 font-medium">
+                      <ScanSearch className="w-3.5 h-3.5 text-indigo-400" /> Analysis Summary
+                    </div>
+                    {responseData.payload.summary && (
+                      <p className="text-sm text-slate-200 leading-relaxed bg-slate-900/50 border border-slate-900 rounded-xl p-4">
+                        {responseData.payload.summary}
+                      </p>
+                    )}
+                    {/* Combined analysis (face+body+structure) case: one summary per section */}
+                    {!responseData.payload.summary && (
+                      <div className="flex flex-col gap-2">
+                        {Object.entries(responseData.payload).map(([section, data]) => (
+                          data && data.summary ? (
+                            <div key={section} className="bg-slate-900/50 border border-slate-900 rounded-xl p-4">
+                              <p className="text-[10px] uppercase tracking-widest text-indigo-400 font-semibold mb-1">{section}</p>
+                              <p className="text-sm text-slate-200 leading-relaxed">{data.summary}</p>
+                            </div>
+                          ) : null
+                        ))}
+                      </div>
+                    )}
+                    <details className="text-[10px] text-slate-500">
+                      <summary className="cursor-pointer hover:text-slate-300">Raw measurement data</summary>
+                      <pre className="mt-2 w-full bg-slate-900/50 border border-slate-900 font-mono text-[10px] text-indigo-300 p-3 rounded-lg overflow-auto select-all leading-relaxed whitespace-pre-wrap text-left">
+                        {JSON.stringify(responseData.payload, null, 2)}
+                      </pre>
+                    </details>
                   </div>
                 )}
               </div>

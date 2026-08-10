@@ -21,6 +21,14 @@ class InpaintEngine:
             self.pipe.vae.to(dtype=torch.float32)
 
         self.pipe.scheduler = DPMSolverMultistepScheduler.from_config(self.pipe.scheduler.config)
+
+        # Compel handles prompts longer than CLIP's native 77-token limit by
+        # chunking into 75-token blocks, encoding each separately, and
+        # concatenating the resulting embeddings — instead of truncating or
+        # rewriting the prompt. Built lazily/reused across calls.
+        from compel import Compel
+        self.compel = Compel(tokenizer=self.pipe.tokenizer, text_encoder=self.pipe.text_encoder)
+
         print(f"🛡️ [INPAINT ENGINE] Ready on {self.device.upper()} (dtype={dtype})")
 
     def _sanitize_mask(self, mask_image):
@@ -35,13 +43,25 @@ class InpaintEngine:
         print(f"🚀 [INPAINT RUNTIME] Executing inference loop on {self.device.upper()}...")
         mask_image = self._sanitize_mask(mask_image)
 
+        # Build embeddings via Compel (chunks + concatenates automatically
+        # for prompts over 75 tokens) instead of passing a raw prompt string,
+        # which the pipeline would otherwise silently truncate at 77 tokens.
+        prompt_embeds = self.compel(prompt)
+        negative_prompt_embeds = self.compel(config.GLOBAL_NEGATIVE_PROMPT)
+        # Compel pads the shorter of the two embeddings to match token-chunk
+        # count, since prompt/negative_prompt can differ in length.
+        [prompt_embeds, negative_prompt_embeds] = self.compel.pad_conditioning_tensors_to_same_length(
+            [prompt_embeds, negative_prompt_embeds]
+        )
+
         result_img = self.pipe(
-            prompt=prompt,
-            negative_prompt=config.GLOBAL_NEGATIVE_PROMPT,
+            prompt_embeds=prompt_embeds,
+            negative_prompt_embeds=negative_prompt_embeds,
             image=image,
             mask_image=mask_image,
             num_inference_steps=config.INFERENCE_STEPS,
             guidance_scale=config.GUIDANCE_SCALE,
+            strength=config.INPAINT_STRENGTH,
         ).images[0]
 
         return result_img

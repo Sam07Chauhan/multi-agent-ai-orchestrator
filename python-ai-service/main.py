@@ -14,6 +14,7 @@ from engines.inpaint import InpaintEngine
 from engines.text_enhancer import LlamaOrchestrator
 from engines.face_detection import YoloFaceEngine
 from engines.prompt_utils import fit_clip_prompt
+from engines.analysis import ANALYZERS, run_analyzers, route_analysis_by_keywords
 from services.pre_process import preprocess_image, segment_subject, build_inpaint_mask
 from services.post_process import restore_face, finalize_dimensions
 
@@ -51,6 +52,34 @@ async def central_orchestrator_endpoint(
 
         sql_result = await llama_orchestrator.generate_sql_query(prompt, schema)
         return {"task_id": task_id, "type": "DATABASE_SQL", "payload": sql_result}
+
+    elif detected_intent == "IMAGE_ANALYSIS":
+        if not file:
+            raise HTTPException(status_code=400, detail="Image payload missing for analysis.")
+
+        try:
+            image_bytes = await file.read()
+            input_image = Image.open(io.BytesIO(image_bytes)).convert("RGB")
+
+            # Ask Llama which analyzer(s) apply (multi-label); registry keys
+            # stay in sync automatically since we pass ANALYZERS.keys() live.
+            categories = await llama_orchestrator.detect_analysis_categories(
+                prompt, list(ANALYZERS.keys())
+            )
+            if categories:
+                logger.info(f"Llama-routed analysis categories: {categories}")
+                result = run_analyzers(categories, input_image)
+            else:
+                # Llama unavailable or gave nothing usable — fall back to
+                # keyword matching (or run everything if that also misses).
+                logger.info("Llama gave no analysis categories; falling back to keyword routing")
+                result = route_analysis_by_keywords(prompt, input_image)
+
+            return {"task_id": task_id, "type": "IMAGE_ANALYSIS", "payload": result}
+
+        except Exception as e:
+            logger.critical(f"Analysis Pipeline Failure: {e}")
+            raise HTTPException(status_code=500, detail=f"AI Analysis Exception: {str(e)}")
 
     elif detected_intent == "IMAGE_EDIT" or detected_intent == "IMAGE":
         if not file:

@@ -9,7 +9,7 @@ builder.Services.AddControllers(); // API Controllers run karne ke liye zaroori 
 builder.Services.AddHttpClient("PythonAiClient", client =>
 {
     client.BaseAddress = new Uri("http://localhost:8000/"); // Python server port framework address
-    client.Timeout = TimeSpan.FromMinutes(5); // ⚡ Heavy Image Inpainting generation ke liye timeout 5 minutes kiya
+    client.Timeout = TimeSpan.FromMinutes(15); // ⚡ Heavy Image Inpainting generation ke liye timeout 5 minutes kiya
 });
 
 builder.Services.AddScoped<AiOrchestratorService>();

@@ -14,6 +14,7 @@ class LlamaOrchestrator:
             "You are an AI Routing Assistant. Classify the user query into exactly ONE category.\n"
             "Categories:\n"
             "- IMAGE_EDIT: If user wants to change clothes, modify images, generate photos, or look styles.\n"
+            "- IMAGE_ANALYSIS: If user wants to analyze, measure, or describe an image — face structure, body proportions, building/structure style, etc. No image is generated.\n"
             "- DATABASE_QUERY: If user asks for reports, stats, SQL queries, database info, tables, or records.\n"
             "Output ONLY the category name. No explanations, no punctuation."
         )
@@ -25,15 +26,59 @@ class LlamaOrchestrator:
                 "options": {"temperature": 0.0, "num_predict": 10}
             }
             async with httpx.AsyncClient() as client:
-                response = await client.post(self.ollama_url, json=payload, timeout=5.0)
+                response = await client.post(self.ollama_url, json=payload, timeout=15.0)
                 if response.status_code == 200:
                     intent = response.json().get("response", "").strip().upper()
+                    if "ANALYSIS" in intent: return "IMAGE_ANALYSIS"
                     if "IMAGE" in intent: return "IMAGE_EDIT"
                     if "DATABASE" in intent or "SQL" in intent: return "DATABASE_QUERY"
             return "IMAGE_EDIT" # Default Fallback
         except Exception as e:
-            logger.error(f"Llama Intent Detection Failed: {e}")
+            logger.error(f"Llama Intent Detection Failed: {type(e).__name__}: {e!r}")
             return "IMAGE_EDIT"
+
+    async def detect_analysis_categories(self, user_query: str, categories: list) -> list:
+        """
+        Multi-label classify which analysis categories a query wants
+        (e.g. a prompt can ask for both "face" and "hand" at once).
+        `categories` should be the ANALYZERS registry keys from analysis.py,
+        so this stays in sync automatically as new analyzers are added —
+        no hardcoded category list to maintain here.
+
+        Returns a list of matched category names (possibly empty, meaning
+        "run everything" — the caller decides that fallback).
+        """
+        category_list = ", ".join(categories)
+        system_instruction = (
+            "You are an AI Routing Assistant for an image analysis system.\n"
+            f"Available analysis categories: {category_list}\n"
+            "Given the user's request, output ONLY the category names that apply, "
+            "comma-separated, using EXACTLY the names given above. "
+            "If the request doesn't clearly ask for any specific category, output NONE.\n"
+            "No explanations, no extra text."
+        )
+        try:
+            payload = {
+                "model": "llama3",
+                "prompt": f"{system_instruction}\n\nUser Query: {user_query}\n\nCategories:",
+                "stream": False,
+                "options": {"temperature": 0.0, "num_predict": 30}
+            }
+            async with httpx.AsyncClient() as client:
+                response = await client.post(self.ollama_url, json=payload, timeout=15.0)
+                if response.status_code == 200:
+                    raw = response.json().get("response", "").strip().upper()
+                    if "NONE" in raw:
+                        return []
+                    matched = [
+                        cat for cat in categories
+                        if cat.upper() in raw
+                    ]
+                    return matched
+            return []
+        except Exception as e:
+            logger.error(f"Llama Analysis Category Detection Failed: {type(e).__name__}: {e!r}")
+            return []
 
     async def generate_sql_query(self, user_query: str, schema_str: str) -> str:
         """Run Text-to-SQL generation based on the provided schema framework."""
@@ -54,4 +99,5 @@ class LlamaOrchestrator:
                     return response.json().get("response", "").strip()
             return "SELECT 'Error generating SQL from local Llama engine';"
         except Exception as e:
-            return f"Error: {str(e)}"
+            logger.error(f"SQL Generation Failed: {type(e).__name__}: {e!r}")
+            return f"Error: {type(e).__name__}: {e}"
